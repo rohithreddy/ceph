@@ -21,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <tuple>
+#include <optional>
 #include <boost/container/small_vector.hpp>
 #include <boost/optional/optional_io.hpp>
 #include <boost/tuple/tuple.hpp>
@@ -311,8 +312,8 @@ template<typename Rep, typename Period,
 void encode(const std::chrono::duration<Rep, Period>& d,
 	    ceph::bufferlist &bl) {
   using namespace std::chrono;
-  uint32_t s = duration_cast<seconds>(d).count();
-  uint32_t ns = (duration_cast<nanoseconds>(d) % seconds(1)).count();
+  int32_t s = duration_cast<seconds>(d).count();
+  int32_t ns = (duration_cast<nanoseconds>(d) % seconds(1)).count();
   encode(s, bl);
   encode(ns, bl);
 }
@@ -321,8 +322,8 @@ template<typename Rep, typename Period,
          typename std::enable_if_t<std::is_integral_v<Rep>>* = nullptr>
 void decode(std::chrono::duration<Rep, Period>& d,
 	    bufferlist::const_iterator& p) {
-  uint32_t s;
-  uint32_t ns;
+  int32_t s;
+  int32_t ns;
   decode(s, p);
   decode(ns, p);
   d = std::chrono::seconds(s) + std::chrono::nanoseconds(ns);
@@ -335,6 +336,10 @@ template<typename T>
 inline void encode(const boost::optional<T> &p, bufferlist &bl);
 template<typename T>
 inline void decode(boost::optional<T> &p, bufferlist::const_iterator &bp);
+template<typename T>
+inline void encode(const std::optional<T> &p, bufferlist &bl);
+template<typename T>
+inline void decode(std::optional<T> &p, bufferlist::const_iterator &bp);
 template<class A, class B, class C>
 inline void encode(const boost::tuple<A, B, C> &t, bufferlist& bl);
 template<class A, class B, class C>
@@ -568,6 +573,32 @@ inline void decode(boost::optional<T> &p, bufferlist::const_iterator &bp)
 }
 #pragma GCC diagnostic pop
 #pragma GCC diagnostic warning "-Wpragmas"
+
+// std optional
+template<typename T>
+inline void encode(const std::optional<T> &p, bufferlist &bl)
+{
+  __u8 present = static_cast<bool>(p);
+  encode(present, bl);
+  if (p)
+    encode(*p, bl);
+}
+
+#pragma GCC diagnostic ignored "-Wpragmas"
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
+template<typename T>
+inline void decode(std::optional<T> &p, bufferlist::const_iterator &bp)
+{
+  __u8 present;
+  decode(present, bp);
+  if (present) {
+    p = T{};
+    decode(*p, bp);
+  } else {
+    p = std::nullopt;
+  }
+}
 
 // std::tuple
 template<typename... Ts>

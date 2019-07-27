@@ -167,7 +167,7 @@ void global_pre_init(
   conf.do_argv_commands();
 
   // Now we're ready to complain about config file parse errors
-  g_conf().complain_about_parse_errors(g_ceph_context);
+  g_conf().complain_about_parse_error(g_ceph_context);
 }
 
 boost::intrusive_ptr<CephContext>
@@ -349,7 +349,7 @@ global_init(const std::map<std::string,std::string> *defaults,
   }
 
   // Now we're ready to complain about config file parse errors
-  g_conf().complain_about_parse_errors(g_ceph_context);
+  g_conf().complain_about_parse_error(g_ceph_context);
 
   // test leak checking
   if (g_conf()->debug_deliberately_leak_memory) {
@@ -393,7 +393,7 @@ int global_init_prefork(CephContext *cct)
   const auto& conf = cct->_conf;
   if (!conf->daemonize) {
 
-    if (pidfile_write(conf) < 0)
+    if (pidfile_write(conf->pid_file) < 0)
       exit(1);
 
     if ((cct->get_init_flags() & CINIT_FLAG_DEFER_DROP_PRIVILEGES) &&
@@ -474,7 +474,7 @@ void global_init_postfork_start(CephContext *cct)
   reopen_as_null(cct, STDIN_FILENO);
 
   const auto& conf = cct->_conf;
-  if (pidfile_write(conf) < 0)
+  if (pidfile_write(conf->pid_file) < 0)
     exit(1);
 
   if ((cct->get_init_flags() & CINIT_FLAG_DEFER_DROP_PRIVILEGES) &&

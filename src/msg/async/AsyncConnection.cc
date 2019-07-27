@@ -455,6 +455,8 @@ void AsyncConnection::process() {
           read_buffer = nullptr;
           readCallback(buf_tmp, r);
         }
+	logger->tinc(l_msgr_running_recv_time,
+	    ceph::mono_clock::now() - recv_start_time);
         return;
       }
       break;
@@ -521,6 +523,18 @@ int AsyncConnection::send_message(Message *m)
 		      << *m << " -- " << m << " con "
 		      << this
 		      << dendl;
+
+  auto cct = async_msgr->cct;
+  if ((cct->_conf->ms_blackhole_mon && peer_type == CEPH_ENTITY_TYPE_MON)||
+      (cct->_conf->ms_blackhole_osd && peer_type == CEPH_ENTITY_TYPE_OSD)||
+      (cct->_conf->ms_blackhole_mds && peer_type == CEPH_ENTITY_TYPE_MDS)||
+      (cct->_conf->ms_blackhole_client &&
+       peer_type == CEPH_ENTITY_TYPE_CLIENT)) {
+    lgeneric_subdout(cct, ms, 0) << __func__ << ceph_entity_type_name(peer_type)
+				 << " blackhole " << *m << dendl;
+    m->put();
+    return 0;
+  }
 
   // optimistic think it's ok to encode(actually may broken now)
   if (!m->get_priority())
@@ -755,7 +769,7 @@ void AsyncConnection::tick(uint64_t id)
     if (connect_timeout_us <=
         (uint64_t)std::chrono::duration_cast<std::chrono::microseconds>
           (now - last_connect_started).count()) {
-      ldout(async_msgr->cct, 0) << __func__ << " see no progress in more than "
+      ldout(async_msgr->cct, 1) << __func__ << " see no progress in more than "
                                 << connect_timeout_us
                                 << " us during connecting, fault."
                                 << dendl;

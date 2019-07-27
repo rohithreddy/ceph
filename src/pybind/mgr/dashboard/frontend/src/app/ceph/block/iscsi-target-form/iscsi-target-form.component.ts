@@ -12,6 +12,7 @@ import { RbdService } from '../../../shared/api/rbd.service';
 import { SelectMessages } from '../../../shared/components/select/select-messages.model';
 import { SelectOption } from '../../../shared/components/select/select-option.model';
 import { ActionLabelsI18n } from '../../../shared/constants/app.constants';
+import { Icons } from '../../../shared/enum/icons.enum';
 import { CdFormGroup } from '../../../shared/forms/cd-form-group';
 import { CdValidators } from '../../../shared/forms/cd-validators';
 import { FinishedTask } from '../../../shared/models/finished-task';
@@ -29,11 +30,15 @@ export class IscsiTargetFormComponent implements OnInit {
   modalRef: BsModalRef;
   minimum_gateways = 1;
   target_default_controls: any;
+  target_controls_limits: any;
   disk_default_controls: any;
+  disk_controls_limits: any;
   backstores: string[];
   default_backstore: string;
-  supported_rbd_features: any;
+  unsupported_rbd_features: any;
   required_rbd_features: any;
+
+  icons = Icons;
 
   isEdit = false;
   target_iqn: string;
@@ -121,10 +126,12 @@ export class IscsiTargetFormComponent implements OnInit {
       // iscsiService.settings()
       this.minimum_gateways = data[3].config.minimum_gateways;
       this.target_default_controls = data[3].target_default_controls;
+      this.target_controls_limits = data[3].target_controls_limits;
       this.disk_default_controls = data[3].disk_default_controls;
+      this.disk_controls_limits = data[3].disk_controls_limits;
       this.backstores = data[3].backstores;
       this.default_backstore = data[3].default_backstore;
-      this.supported_rbd_features = data[3].supported_rbd_features;
+      this.unsupported_rbd_features = data[3].unsupported_rbd_features;
       this.required_rbd_features = data[3].required_rbd_features;
 
       // rbdService.list()
@@ -577,10 +584,10 @@ export class IscsiTargetFormComponent implements OnInit {
 
     // Portals
     formValue.portals.forEach((portal) => {
-      const portalSplit = portal.split(':');
+      const index = portal.indexOf(':');
       request.portals.push({
-        host: portalSplit[0],
-        ip: portalSplit[1]
+        host: portal.substring(0, index),
+        ip: portal.substring(index + 1)
       });
     });
 
@@ -663,7 +670,8 @@ export class IscsiTargetFormComponent implements OnInit {
   targetSettingsModal() {
     const initialState = {
       target_controls: this.targetForm.get('target_controls'),
-      target_default_controls: this.target_default_controls
+      target_default_controls: this.target_default_controls,
+      target_controls_limits: this.target_controls_limits
     };
 
     this.modalRef = this.modalService.show(IscsiTargetIqnSettingsModalComponent, { initialState });
@@ -674,6 +682,7 @@ export class IscsiTargetFormComponent implements OnInit {
       imagesSettings: this.imagesSettings,
       image: image,
       disk_default_controls: this.disk_default_controls,
+      disk_controls_limits: this.disk_controls_limits,
       backstores: this.getValidBackstores(this.getImageById(image))
     };
 
@@ -685,11 +694,11 @@ export class IscsiTargetFormComponent implements OnInit {
   validFeatures(image, backstore) {
     const imageFeatures = image.features;
     const requiredFeatures = this.required_rbd_features[backstore];
-    const supportedFeatures = this.supported_rbd_features[backstore];
+    const unsupportedFeatures = this.unsupported_rbd_features[backstore];
     // tslint:disable-next-line:no-bitwise
     const validRequiredFeatures = (imageFeatures & requiredFeatures) === requiredFeatures;
     // tslint:disable-next-line:no-bitwise
-    const validSupportedFeatures = (imageFeatures & supportedFeatures) === imageFeatures;
+    const validSupportedFeatures = (imageFeatures & unsupportedFeatures) === 0;
     return validRequiredFeatures && validSupportedFeatures;
   }
 

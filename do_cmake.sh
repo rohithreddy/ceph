@@ -1,4 +1,5 @@
-#!/bin/sh -x
+#!/usr/bin/env bash
+set -x
 git submodule update --init --recursive
 if test -e build; then
     echo 'build dir already exists; rm -rf build and re-run'
@@ -11,13 +12,13 @@ if [ -r /etc/os-release ]; then
   case "$ID" in
       fedora)
           if [ "$VERSION_ID" -ge "29" ] ; then
-              PYBUILD="3"
+              PYBUILD="3.7"
           fi
           ;;
       rhel|centos)
           MAJOR_VER=$(echo "$VERSION_ID" | sed -e 's/\..*$//')
           if [ "$MAJOR_VER" -ge "8" ] ; then
-              PYBUILD="3"
+              PYBUILD="3.6"
           fi
           ;;
       opensuse*|suse|sles)
@@ -33,8 +34,8 @@ else
   exit 1
 fi
 
-if [ "$PYBUILD" = "3" ] ; then
-    ARGS="$ARGS -DWITH_PYTHON2=OFF -DWITH_PYTHON3=ON -DMGR_PYTHON_VERSION=3"
+if [[ "$PYBUILD" =~ ^3(\..*)?$ ]] ; then
+    ARGS="$ARGS -DWITH_PYTHON2=OFF -DWITH_PYTHON3=${PYBUILD} -DMGR_PYTHON_VERSION=${PYBUILD}"
 fi
 
 if type ccache > /dev/null 2>&1 ; then
@@ -56,6 +57,7 @@ ${CMAKE} -DCMAKE_BUILD_TYPE=Debug $ARGS "$@" .. || exit 1
 
 # minimal config to find plugins
 cat <<EOF > ceph.conf
+[global]
 plugin dir = lib
 erasure code dir = lib
 EOF

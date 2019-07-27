@@ -2,7 +2,6 @@ import time
 import signal
 import json
 import logging
-from unittest import case, SkipTest
 from random import randint
 
 from cephfs_test_case import CephFSTestCase
@@ -242,11 +241,11 @@ class TestFailover(CephFSTestCase):
         """
 
         if not isinstance(self.mount_a, FuseMount):
-            raise SkipTest("Requires FUSE client to inject client metadata")
+            self.skipTest("Requires FUSE client to inject client metadata")
 
         require_active = self.fs.get_config("fuse_require_active_mds", service_type="mon").lower() == "true"
         if not require_active:
-            raise case.SkipTest("fuse_require_active_mds is not set")
+            self.skipTest("fuse_require_active_mds is not set")
 
         grace = float(self.fs.get_config("mds_beacon_grace", service_type="mon"))
 
@@ -365,7 +364,7 @@ class TestStandbyReplay(CephFSTestCase):
         self.assertEqual(0, len(list(self.fs.get_replays(status=status))))
         return status
 
-    def _confirm_single_replay(self, full=True, status=None):
+    def _confirm_single_replay(self, full=True, status=None, retries=3):
         status = self.fs.wait_for_daemons(status=status)
         ranks = sorted(self.fs.get_mds_map(status=status)['in'])
         replays = list(self.fs.get_replays(status=status))
@@ -378,7 +377,11 @@ class TestStandbyReplay(CephFSTestCase):
                     has_replay = True
                     checked_replays.add(replay['gid'])
             if full and not has_replay:
-                raise RuntimeError("rank "+str(rank)+" has no standby-replay follower")
+                if retries <= 0:
+                    raise RuntimeError("rank "+str(rank)+" has no standby-replay follower")
+                else:
+                    retries = retries-1
+                    time.sleep(2)
         self.assertEqual(checked_replays, set(info['gid'] for info in replays))
         return status
 

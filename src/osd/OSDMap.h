@@ -24,17 +24,20 @@
  *   disks, disk groups, total # osds,
  *
  */
-#include "include/types.h"
-#include "osd_types.h"
-
-//#include "include/ceph_features.h"
-#include "crush/CrushWrapper.h"
 #include <vector>
 #include <list>
 #include <set>
 #include <map>
 #include <memory>
+
+#include <boost/smart_ptr/local_shared_ptr.hpp>
 #include "include/btree_map.h"
+#include "include/types.h"
+#include "common/ceph_releases.h"
+#include "osd_types.h"
+
+//#include "include/ceph_features.h"
+#include "crush/CrushWrapper.h"
 
 // forward declaration
 class CephContext;
@@ -89,16 +92,18 @@ struct osd_xinfo_t {
   __u32 laggy_interval;    ///< average interval between being marked laggy and recovering
   uint64_t features;       ///< features supported by this osd we should know about
   __u32 old_weight;        ///< weight prior to being auto marked out
+  utime_t last_purged_snaps_scrub; ///< last scrub of purged_snaps
+  epoch_t dead_epoch = 0;  ///< last epoch we were confirmed dead (not just down)
 
   osd_xinfo_t() : laggy_probability(0), laggy_interval(0),
                   features(0), old_weight(0) {}
 
   void dump(ceph::Formatter *f) const;
-  void encode(ceph::buffer::list& bl) const;
+  void encode(ceph::buffer::list& bl, uint64_t features) const;
   void decode(ceph::buffer::list::const_iterator& bl);
   static void generate_test_instances(std::list<osd_xinfo_t*>& o);
 };
-WRITE_CLASS_ENCODER(osd_xinfo_t)
+WRITE_CLASS_ENCODER_FEATURES(osd_xinfo_t)
 
 std::ostream& operator<<(std::ostream& out, const osd_xinfo_t& xi);
 
@@ -346,10 +351,6 @@ class OSDMap {
 public:
   MEMPOOL_CLASS_HELPERS();
 
-  typedef interval_set<
-    snapid_t,
-    mempool::osdmap::flat_map<snapid_t,snapid_t>> snap_interval_set_t;
-
   class Incremental {
   public:
     MEMPOOL_CLASS_HELPERS();
@@ -362,7 +363,7 @@ public:
     utime_t modified;
     int64_t new_pool_max; //incremented by the OSDMonitor on each pool create
     int32_t new_flags;
-    int8_t new_require_osd_release = -1;
+    ceph_release_t new_require_osd_release{0xff};
 
     // full (rare)
     ceph::buffer::list fullmap;  // in lieu of below.
@@ -400,6 +401,7 @@ public:
     mempool::osdmap::map<int64_t, snap_interval_set_t> new_purged_snaps;
 
     mempool::osdmap::map<int32_t,uint32_t> new_crush_node_flags;
+    mempool::osdmap::map<int32_t,uint32_t> new_device_class_flags;
 
     std::string cluster_snapshot;
 
@@ -407,7 +409,7 @@ public:
     float new_backfillfull_ratio = -1;
     float new_full_ratio = -1;
 
-    int8_t new_require_min_compat_client = -1;
+    ceph_release_t new_require_min_compat_client{0xff};
 
     utime_t new_last_up_change, new_last_in_change;
 
@@ -476,8 +478,11 @@ public:
       return new_state.count(osd) && (new_state[osd] & state) != 0;
     }
 
-    void pending_osd_state_set(int osd, unsigned state) {
+    bool pending_osd_state_set(int osd, unsigned state) {
+      if (pending_osd_has_state(osd, state))
+        return false;
       new_state[osd] |= state;
+      return true;
     }
 
     // cancel the specified pending osd state if there is any
@@ -496,6 +501,13 @@ public:
       return true;
     }
 
+    bool in_new_removed_snaps(int64_t pool, snapid_t snap) const {
+      auto p = new_removed_snaps.find(pool);
+      if (p == new_removed_snaps.end()) {
+	return false;
+      }
+      return p->second.contains(snap);
+    }
   };
   
 private:
@@ -514,6 +526,7 @@ private:
   std::vector<uint32_t> osd_state;
 
   mempool::osdmap::map<int32_t,uint32_t> crush_node_flags; // crush node -> CEPH_OSD_* flags
+  mempool::osdmap::map<int32_t,uint32_t> device_class_flags; // device class -> CEPH_OSD_* flags
 
   utime_t last_up_change, last_in_change;
 
@@ -532,7 +545,8 @@ private:
     CEPH_FEATUREMASK_CRUSH_CHOOSE_ARGS |
     CEPH_FEATUREMASK_SERVER_LUMINOUS |
     CEPH_FEATUREMASK_SERVER_MIMIC |
-    CEPH_FEATUREMASK_SERVER_NAUTILUS;
+    CEPH_FEATUREMASK_SERVER_NAUTILUS |
+    CEPH_FEATUREMASK_SERVER_OCTOPUS;
 
   struct addrs_s {
     mempool::osdmap::vector<std::shared_ptr<entity_addrvec_t> > client_addrs;
@@ -580,11 +594,11 @@ private:
   float full_ratio = 0, backfillfull_ratio = 0, nearfull_ratio = 0;
 
   /// min compat client we want to support
-  uint8_t require_min_compat_client = 0;  // CEPH_RELEASE_*
+  ceph_release_t require_min_compat_client{ceph_release_t::unknown};
 
 public:
   /// require osds to run at least this release
-  uint8_t require_osd_release = 0;    // CEPH_RELEASE_*
+  ceph_release_t require_osd_release{ceph_release_t::unknown};
 
 private:
   mutable uint64_t cached_up_osd_features;
@@ -832,66 +846,83 @@ public:
     return !is_out(osd);
   }
 
-  unsigned get_crush_node_flags(int osd) const;
+  bool is_dead(int osd) const {
+    if (!exists(osd)) {
+      return false; // unclear if they know they are removed from map
+    }
+    return get_xinfo(osd).dead_epoch > get_info(osd).up_from;
+  }
 
-  bool is_noup(int osd) const {
+  unsigned get_osd_crush_node_flags(int osd) const;
+  unsigned get_crush_node_flags(int id) const;
+  unsigned get_device_class_flags(int id) const;
+
+  bool is_noup_by_osd(int osd) const {
     return exists(osd) && (osd_state[osd] & CEPH_OSD_NOUP);
   }
 
-  bool is_nodown(int osd) const {
+  bool is_nodown_by_osd(int osd) const {
     return exists(osd) && (osd_state[osd] & CEPH_OSD_NODOWN);
   }
 
-  bool is_noin(int osd) const {
+  bool is_noin_by_osd(int osd) const {
     return exists(osd) && (osd_state[osd] & CEPH_OSD_NOIN);
   }
 
-  bool is_noout(int osd) const {
+  bool is_noout_by_osd(int osd) const {
     return exists(osd) && (osd_state[osd] & CEPH_OSD_NOOUT);
   }
 
-  void get_noup_osds(std::vector<int> *osds) const {
-    ceph_assert(osds);
-    osds->clear();
-
-    for (int i = 0; i < max_osd; i++) {
-      if (is_noup(i)) {
-        osds->push_back(i);
-      }
-    }
+  bool is_noup(int osd) const {
+    if (test_flag(CEPH_OSDMAP_NOUP)) // global?
+      return true;
+    if (is_noup_by_osd(osd)) // by osd?
+      return true;
+    if (get_osd_crush_node_flags(osd) & CEPH_OSD_NOUP) // by crush-node?
+      return true;
+    if (auto class_id = crush->get_item_class_id(osd); class_id >= 0 &&
+        get_device_class_flags(class_id) & CEPH_OSD_NOUP) // by device-class?
+      return true;
+    return false;
   }
 
-  void get_nodown_osds(std::vector<int> *osds) const {
-    ceph_assert(osds);
-    osds->clear();
-
-    for (int i = 0; i < max_osd; i++) {
-      if (is_nodown(i)) {
-        osds->push_back(i);
-      }
-    }
+  bool is_nodown(int osd) const {
+    if (test_flag(CEPH_OSDMAP_NODOWN))
+      return true;
+    if (is_nodown_by_osd(osd))
+      return true;
+    if (get_osd_crush_node_flags(osd) & CEPH_OSD_NODOWN)
+      return true;
+    if (auto class_id = crush->get_item_class_id(osd); class_id >= 0 &&
+        get_device_class_flags(class_id) & CEPH_OSD_NODOWN)
+      return true;
+    return false;
   }
 
-  void get_noin_osds(std::vector<int> *osds) const {
-    ceph_assert(osds);
-    osds->clear();
-
-    for (int i = 0; i < max_osd; i++) {
-      if (is_noin(i)) {
-        osds->push_back(i);
-      }
-    }
+  bool is_noin(int osd) const {
+    if (test_flag(CEPH_OSDMAP_NOIN))
+      return true;
+    if (is_noin_by_osd(osd))
+      return true;
+    if (get_osd_crush_node_flags(osd) & CEPH_OSD_NOIN)
+      return true;
+    if (auto class_id = crush->get_item_class_id(osd); class_id >= 0 &&
+        get_device_class_flags(class_id) & CEPH_OSD_NOIN)
+      return true;
+    return false;
   }
 
-  void get_noout_osds(std::vector<int> *osds) const {
-    ceph_assert(osds);
-    osds->clear();
-
-    for (int i = 0; i < max_osd; i++) {
-      if (is_noout(i)) {
-        osds->push_back(i);
-      }
-    }
+  bool is_noout(int osd) const {
+    if (test_flag(CEPH_OSDMAP_NOOUT))
+      return true;
+    if (is_noout_by_osd(osd))
+      return true;
+    if (get_osd_crush_node_flags(osd) & CEPH_OSD_NOOUT)
+      return true;
+    if (auto class_id = crush->get_item_class_id(osd); class_id >= 0 &&
+        get_device_class_flags(class_id) & CEPH_OSD_NOOUT)
+      return true;
+    return false;
   }
 
   /**
@@ -1011,22 +1042,30 @@ public:
    * get oldest *client* version (firefly, hammer, etc.) that can connect given
    * the feature bits required (according to get_features()).
    */
-  uint8_t get_min_compat_client() const;
+  ceph_release_t get_min_compat_client() const;
 
   /**
    * gets the required minimum *client* version that can connect to the cluster.
    */
-  uint8_t get_require_min_compat_client() const;
+  ceph_release_t get_require_min_compat_client() const;
 
   /**
    * get intersection of features supported by up osds
    */
   uint64_t get_up_osd_features() const;
 
-  void maybe_remove_pg_upmaps(CephContext *cct,
-                              const OSDMap& oldmap,
-			      const OSDMap& nextmap,
-                              Incremental *pending_inc);
+  void get_upmap_pgs(vector<pg_t> *upmap_pgs) const;
+  bool check_pg_upmaps(
+    CephContext *cct,
+    const vector<pg_t>& to_check,
+    vector<pg_t> *to_cancel,
+    map<pg_t, mempool::osdmap::vector<pair<int,int>>> *to_remap) const;
+  void clean_pg_upmaps(
+    CephContext *cct,
+    Incremental *pending_inc,
+    const vector<pg_t>& to_cancel,
+    const map<pg_t, mempool::osdmap::vector<pair<int,int>>>& to_remap) const;
+  bool clean_pg_upmaps(CephContext *cct, Incremental *pending_inc) const;
 
   int apply_incremental(const Incremental &inc);
 
@@ -1163,7 +1202,8 @@ public:
    * raw and primary must be non-NULL
    */
   void pg_to_raw_osds(pg_t pg, std::vector<int> *raw, int *primary) const;
-  void pg_to_raw_upmap(pg_t pg, std::vector<int> *raw_upmap) const;
+  void pg_to_raw_upmap(pg_t pg, std::vector<int> *raw,
+                       std::vector<int> *raw_upmap) const;
   /// map a pg to its acting set. @return acting set size
   void pg_to_acting_osds(const pg_t& pg, std::vector<int> *acting,
                         int *acting_primary) const {
@@ -1238,6 +1278,14 @@ public:
     return false;
   }
 
+  bool in_removed_snaps_queue(int64_t pool, snapid_t snap) const {
+    auto p = removed_snaps_queue.find(pool);
+    if (p == removed_snaps_queue.end()) {
+      return false;
+    }
+    return p->second.contains(snap);
+  }
+
   const mempool::osdmap::map<int64_t,snap_interval_set_t>&
   get_removed_snaps_queue() const {
     return removed_snaps_queue;
@@ -1304,6 +1352,12 @@ public:
     auto p = pools.find(pg.pool());
     ceph_assert(p != pools.end());
     return p->second.get_type();
+  }
+  int get_pool_crush_rule(int64_t pool_id) const {
+    auto pool = get_pg_pool(pool_id);
+    if (!pool)
+      return -ENOENT;
+    return pool->get_crush_rule();
   }
 
 
@@ -1374,10 +1428,6 @@ public:
     return calc_pg_role(osd, group, group.size()) >= 0;
   }
 
-  int clean_pg_upmaps(
-    CephContext *cct,
-    Incremental *pending_inc) const;
-
   bool try_pg_upmap(
     CephContext *cct,
     pg_t pg,                       ///< pg to potentially remap
@@ -1399,6 +1449,14 @@ public:
   bool have_pg_upmaps(pg_t pg) const {
     return pg_upmap.count(pg) ||
       pg_upmap_items.count(pg);
+  }
+
+  bool check_full(const set<pg_shard_t> &missing_on) const {
+    for (auto shard : missing_on) {
+      if (get_state(shard.osd) & CEPH_OSD_FULL)
+	return true;
+    }
+    return false;
   }
 
   /*
@@ -1454,8 +1512,11 @@ private:
   void print_osd_line(int cur, std::ostream *out, ceph::Formatter *f) const;
 public:
   void print(std::ostream& out) const;
+  void print_osd(int id, std::ostream& out) const;
+  void print_osds(std::ostream& out) const;
   void print_pools(std::ostream& out) const;
-  void print_summary(ceph::Formatter *f, std::ostream& out, const std::string& prefix, bool extra=false) const;
+  void print_summary(ceph::Formatter *f, std::ostream& out,
+		     const std::string& prefix, bool extra=false) const;
   void print_oneline_summary(std::ostream& out) const;
 
   enum {
@@ -1465,7 +1526,8 @@ public:
     DUMP_DOWN = 8,       // only 'down' osds
     DUMP_DESTROYED = 16, // only 'destroyed' osds
   };
-  void print_tree(ceph::Formatter *f, std::ostream *out, unsigned dump_flags=0, std::string bucket="") const;
+  void print_tree(ceph::Formatter *f, std::ostream *out,
+		  unsigned dump_flags=0, std::string bucket="") const;
 
   int summarize_mapping_stats(
     OSDMap *newmap,
@@ -1479,6 +1541,8 @@ public:
     const mempool::osdmap::map<std::string,std::map<std::string,std::string> > &profiles,
     ceph::Formatter *f);
   void dump(ceph::Formatter *f) const;
+  void dump_osd(int id, ceph::Formatter *f) const;
+  void dump_osds(ceph::Formatter *f) const;
   static void generate_test_instances(std::list<OSDMap*>& o);
   bool check_new_blacklist_entries() const { return new_blacklist_entries; }
 
@@ -1494,7 +1558,12 @@ public:
 WRITE_CLASS_ENCODER_FEATURES(OSDMap)
 WRITE_CLASS_ENCODER_FEATURES(OSDMap::Incremental)
 
-typedef std::shared_ptr<const OSDMap> OSDMapRef;
+#ifdef WITH_SEASTAR
+using OSDMapRef = boost::local_shared_ptr<const OSDMap>;
+#else
+using OSDMapRef = std::shared_ptr<const OSDMap>;
+#endif
+
 
 inline std::ostream& operator<<(std::ostream& out, const OSDMap& m) {
   m.print_oneline_summary(out);
@@ -1508,7 +1577,6 @@ void print_osd_utilization(const OSDMap& osdmap,
                            std::ostream& out,
                            ceph::Formatter *f,
                            bool tree,
-                           const std::string& class_name,
-                           const std::string& item_name);
+                           const std::string& filter);
 
 #endif

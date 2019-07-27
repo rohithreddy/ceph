@@ -149,6 +149,7 @@ void rgw_pubsub_sub_dest::dump(Formatter *f) const
   encode_json("oid_prefix", oid_prefix, f);
   encode_json("push_endpoint", push_endpoint, f);
   encode_json("push_endpoint_args", push_endpoint_args, f);
+  encode_json("arn_topic", arn_topic, f);
 }
 
 void rgw_pubsub_sub_config::dump(Formatter *f) const
@@ -247,18 +248,22 @@ int RGWUserPubSub::Bucket::create_notification(const string& topic_name, const E
 
   int ret = ps->get_topic(topic_name, &user_topic_info);
   if (ret < 0) {
-    ldout(store->ctx(), 1) << "ERROR: failed to read topic info: ret=" << ret << dendl;
+    ldout(store->ctx(), 1) << "ERROR: failed to read topic '" << topic_name << "' info: ret=" << ret << dendl;
     return ret;
   }
+  ldout(store->ctx(), 20) << "successfully read topic '" << topic_name << "' info" << dendl;
 
   RGWObjVersionTracker objv_tracker;
   rgw_pubsub_bucket_topics bucket_topics;
 
   ret = read_topics(&bucket_topics, &objv_tracker);
-  if (ret < 0 && ret != -ENOENT) {
-    ldout(store->ctx(), 1) << "ERROR: failed to read bucket topics info: ret=" << ret << dendl;
+  if (ret < 0) {
+    ldout(store->ctx(), 1) << "ERROR: failed to read topics from bucket '" << 
+      bucket.name << "': ret=" << ret << dendl;
     return ret;
   }
+  ldout(store->ctx(), 20) << "successfully read " << bucket_topics.topics.size() << " topics from bucket '" << 
+    bucket.name << "'" << dendl;
 
   auto& topic_filter = bucket_topics.topics[topic_name];
   topic_filter.topic = user_topic_info.topic;
@@ -266,9 +271,11 @@ int RGWUserPubSub::Bucket::create_notification(const string& topic_name, const E
 
   ret = write_topics(bucket_topics, &objv_tracker);
   if (ret < 0) {
-    ldout(store->ctx(), 1) << "ERROR: failed to write topics info: ret=" << ret << dendl;
+    ldout(store->ctx(), 1) << "ERROR: failed to write topics to bucket '" << bucket.name << "': ret=" << ret << dendl;
     return ret;
   }
+    
+  ldout(store->ctx(), 20) << "successfully wrote " << bucket_topics.topics.size() << " topics to bucket '" << bucket.name << "'" << dendl;
 
   return 0;
 }
@@ -288,7 +295,7 @@ int RGWUserPubSub::Bucket::remove_notification(const string& topic_name)
   rgw_pubsub_bucket_topics bucket_topics;
 
   ret = read_topics(&bucket_topics, &objv_tracker);
-  if (ret < 0 && ret != -ENOENT) {
+  if (ret < 0) {
     ldout(store->ctx(), 1) << "ERROR: failed to read bucket topics info: ret=" << ret << dendl;
     return ret;
   }
@@ -509,7 +516,7 @@ int RGWUserPubSub::SubWithEvents<EventType>::list_events(const string& marker, i
   RGWBucketInfo bucket_info;
   string tenant;
   RGWSysObjectCtx obj_ctx(store->svc.sysobj->init_obj_ctx());
-  ret = store->get_bucket_info(obj_ctx, tenant, sub_conf.dest.bucket_name, bucket_info, nullptr, nullptr);
+  ret = store->get_bucket_info(obj_ctx, tenant, sub_conf.dest.bucket_name, bucket_info, nullptr, null_yield, nullptr);
   if (ret == -ENOENT) {
     list.is_truncated = false;
     return 0;
@@ -527,7 +534,7 @@ int RGWUserPubSub::SubWithEvents<EventType>::list_events(const string& marker, i
 
   std::vector<rgw_bucket_dir_entry> objs;
 
-  ret = list_op.list_objects(max_events, &objs, nullptr, &list.is_truncated);
+  ret = list_op.list_objects(max_events, &objs, nullptr, &list.is_truncated, null_yield);
   if (ret < 0) {
     ldout(store->ctx(), 1) << "ERROR: failed to list bucket: bucket=" << sub_conf.dest.bucket_name << " ret=" << ret << dendl;
     return ret;
@@ -575,7 +582,7 @@ int RGWUserPubSub::SubWithEvents<EventType>::remove_event(const string& event_id
   RGWBucketInfo bucket_info;
   string tenant;
   RGWSysObjectCtx sysobj_ctx(store->svc.sysobj->init_obj_ctx());
-  ret = store->get_bucket_info(sysobj_ctx, tenant, sub_conf.dest.bucket_name, bucket_info, nullptr, nullptr);
+  ret = store->get_bucket_info(sysobj_ctx, tenant, sub_conf.dest.bucket_name, bucket_info, nullptr, null_yield, nullptr);
   if (ret < 0) {
     ldout(store->ctx(), 1) << "ERROR: failed to read bucket info for events bucket: bucket=" << sub_conf.dest.bucket_name << " ret=" << ret << dendl;
     return ret;
@@ -594,7 +601,7 @@ int RGWUserPubSub::SubWithEvents<EventType>::remove_event(const string& event_id
   del_op.params.bucket_owner = bucket_info.owner;
   del_op.params.versioning_status = bucket_info.versioning_status();
 
-  ret = del_op.delete_obj();
+  ret = del_op.delete_obj(null_yield);
   if (ret < 0) {
     ldout(store->ctx(), 1) << "ERROR: failed to remove event (obj=" << obj << "): ret=" << ret << dendl;
   }

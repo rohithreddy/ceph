@@ -168,7 +168,7 @@ extern "C" int rados_conf_read_file(rados_t cluster, const char *path) {
   if (ret == 0) {
     conf.parse_env(client->cct()->get_module_type());
     conf.apply_changes(NULL);
-    conf.complain_about_parse_errors(client->cct());
+    conf.complain_about_parse_error(client->cct());
   } else if (ret == -ENOENT) {
     // ignore missing client config
     return 0;
@@ -510,7 +510,8 @@ void IoCtx::close() {
 int IoCtx::create(const std::string& oid, bool exclusive) {
   TestIoCtxImpl *ctx = reinterpret_cast<TestIoCtxImpl*>(io_ctx_impl);
   return ctx->execute_operation(
-    oid, boost::bind(&TestIoCtxImpl::create, _1, _2, exclusive));
+    oid, boost::bind(&TestIoCtxImpl::create, _1, _2, exclusive,
+                     ctx->get_snap_context()));
 }
 
 void IoCtx::dup(const IoCtx& rhs) {
@@ -914,7 +915,7 @@ void ObjectWriteOperation::append(const bufferlist &bl) {
 
 void ObjectWriteOperation::create(bool exclusive) {
   TestObjectOperationImpl *o = reinterpret_cast<TestObjectOperationImpl*>(impl);
-  o->ops.push_back(boost::bind(&TestIoCtxImpl::create, _1, _2, exclusive));
+  o->ops.push_back(boost::bind(&TestIoCtxImpl::create, _1, _2, exclusive, _4));
 }
 
 void ObjectWriteOperation::omap_set(const std::map<std::string, bufferlist> &map) {
@@ -1204,7 +1205,7 @@ WatchCtx2::~WatchCtx2() {
 int cls_cxx_create(cls_method_context_t hctx, bool exclusive) {
   librados::TestClassHandler::MethodContext *ctx =
     reinterpret_cast<librados::TestClassHandler::MethodContext*>(hctx);
-  return ctx->io_ctx_impl->create(ctx->oid, exclusive);
+  return ctx->io_ctx_impl->create(ctx->oid, exclusive, ctx->snapc);
 }
 
 int cls_cxx_remove(cls_method_context_t hctx) {
@@ -1388,6 +1389,12 @@ int cls_cxx_replace(cls_method_context_t hctx, int ofs, int len,
   return ctx->io_ctx_impl->write(ctx->oid, *inbl, len, ofs, ctx->snapc);
 }
 
+int cls_cxx_truncate(cls_method_context_t hctx, int ofs) {
+  librados::TestClassHandler::MethodContext *ctx =
+    reinterpret_cast<librados::TestClassHandler::MethodContext*>(hctx);
+  return ctx->io_ctx_impl->truncate(ctx->oid, ofs, ctx->snapc);
+}
+
 int cls_cxx_list_watchers(cls_method_context_t hctx,
 			  obj_list_watch_response_t *watchers) {
   librados::TestClassHandler::MethodContext *ctx =
@@ -1471,6 +1478,32 @@ int cls_register_cxx_filter(cls_handle_t hclass,
   return cls->create_filter(hclass, filter_name, fn);
 }
 
-int8_t cls_get_required_osd_release(cls_handle_t hclass) {
-  return CEPH_FEATURE_SERVER_NAUTILUS;
+ceph_release_t cls_get_required_osd_release(cls_handle_t hclass) {
+  return ceph_release_t::nautilus;
+}
+
+ceph_release_t cls_get_min_compatible_client(cls_handle_t hclass) {
+  return ceph_release_t::nautilus;
+}
+
+// stubs to silence TestClassHandler::open_class()
+PGLSFilter::~PGLSFilter()
+{}
+
+int cls_gen_rand_base64(char *, int) {
+  return -ENOTSUP;
+}
+
+int cls_cxx_chunk_write_and_set(cls_method_handle_t, int,
+				int, bufferlist *,
+				uint32_t, bufferlist *, int) {
+  return -ENOTSUP;
+}
+
+int cls_cxx_map_read_header(cls_method_handle_t, bufferlist *) {
+  return -ENOTSUP;
+}
+
+uint64_t cls_get_osd_min_alloc_size(cls_method_context_t hctx) {
+  return 0;
 }

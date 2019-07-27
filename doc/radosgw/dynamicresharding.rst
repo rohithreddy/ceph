@@ -85,6 +85,54 @@ Bucket resharding status
 
    # radosgw-admin reshard status --bucket <bucket_name>
 
+The output is a json array of 3 objects (reshard_status, new_bucket_instance_id, num_shards) per shard.
+
+For example, the output at different Dynamic Resharding stages is shown below:
+
+``1. Before resharding occurred:``
+::
+
+  [
+    {
+        "reshard_status": "not-resharding",
+        "new_bucket_instance_id": "",
+        "num_shards": -1
+    }
+  ]
+
+``2. During resharding:``
+::
+
+  [
+    {
+        "reshard_status": "in-progress",
+        "new_bucket_instance_id": "1179f470-2ebf-4630-8ec3-c9922da887fd.8652.1",
+        "num_shards": 2
+    },
+    {
+        "reshard_status": "in-progress",
+        "new_bucket_instance_id": "1179f470-2ebf-4630-8ec3-c9922da887fd.8652.1",
+        "num_shards": 2
+    }
+  ]
+
+``3, After resharding completed:``
+::
+
+  [
+    {
+        "reshard_status": "not-resharding",
+        "new_bucket_instance_id": "",
+        "num_shards": -1
+    },
+    {
+        "reshard_status": "not-resharding",
+        "new_bucket_instance_id": "",
+        "num_shards": -1
+    }
+  ]
+
+
 Cancel pending bucket resharding
 --------------------------------
 
@@ -143,3 +191,30 @@ The command to do so is:
 
 As a convenience wrapper, if the ``--bucket`` argument is dropped then this
 command will try and fix lifecycle policies for all the buckets in the cluster.
+
+Object Expirer fixes
+--------------------
+
+Objects subject to Swift object expiration on older clusters may have
+been dropped from the log pool and never deleted after the bucket was
+resharded. This would happen if their expiration time was before the
+cluster was upgraded, but if their expiration was after the upgrade
+the objects would be correctly handled. To manage these expire-stale
+objects, radosgw-admin provides two subcommands.
+
+Listing:
+
+::
+
+   # radosgw-admin objects expire-stale list --bucket {bucketname}
+
+Displays a list of object names and expiration times in JSON format.
+
+Deleting:
+
+::
+
+   # radosgw-admin objects expire-stale rm --bucket {bucketname}
+
+
+Initiates deletion of such objects, displaying a list of object names, expiration times, and deletion status in JSON format.

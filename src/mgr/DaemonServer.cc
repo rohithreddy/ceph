@@ -393,7 +393,7 @@ bool DaemonServer::handle_open(const ref_t<MMgrOpen>& m)
 				   m->get_connection()->get_peer_type(),
 				   m->daemon_name);
 
-  dout(4) << "from " << m->get_connection() << "  " << key << dendl;
+  dout(10) << "from " << m->get_connection() << "  " << key << dendl;
 
   _send_configure(m->get_connection());
 
@@ -495,13 +495,13 @@ bool DaemonServer::handle_report(const ref_t<MMgrReport>& m)
   }
   key.second = m->daemon_name;
 
-  dout(4) << "from " << m->get_connection() << " " << key << dendl;
+  dout(10) << "from " << m->get_connection() << " " << key << dendl;
 
   if (m->get_connection()->get_peer_type() == entity_name_t::TYPE_CLIENT &&
       m->service_name.empty()) {
     // Clients should not be sending us stats unless they are declaring
     // themselves to be a daemon for some service.
-    dout(4) << "rejecting report from non-daemon client " << m->daemon_name
+    dout(10) << "rejecting report from non-daemon client " << m->daemon_name
 	    << dendl;
     m->get_connection()->mark_down();
     return true;
@@ -1216,39 +1216,21 @@ bool DaemonServer::_handle_command(
       return true;
     }
   } else if (prefix == "osd df") {
-    string method;
+    string method, filter;
     cmd_getval(g_ceph_context, cmdctx->cmdmap, "output_method", method);
-    string filter_by;
-    string filter;
-    cmd_getval(g_ceph_context, cmdctx->cmdmap, "filter_by", filter_by);
     cmd_getval(g_ceph_context, cmdctx->cmdmap, "filter", filter);
-    if (filter_by.empty() != filter.empty()) {
-      cmdctx->reply(-EINVAL, "you must specify both 'filter_by' and 'filter'");
-      return true;
-    }
     stringstream rs;
     r = cluster_state.with_osdmap_and_pgmap([&](const OSDMap& osdmap, const PGMap& pgmap) {
-        string class_name;
-        string item_name;
         // sanity check filter(s)
-        if (filter_by == "class") {
-          if (!osdmap.crush->class_exists(filter)) {
-            rs << "specified class '" << filter << "' does not exist";
-            return -EINVAL;
-          }
-          class_name = filter;
-        }
-        if (filter_by == "name") {
-          if (!osdmap.crush->name_exists(filter)) {
-            rs << "specified name '" << filter << "' does not exist";
-            return -EINVAL;
-          }
-          item_name = filter;
+        if (!filter.empty() &&
+             osdmap.lookup_pg_pool_name(filter) < 0 &&
+            !osdmap.crush->class_exists(filter) &&
+            !osdmap.crush->name_exists(filter)) {
+          rs << "'" << filter << "' not a pool, crush node or device class name";
+          return -EINVAL;
         }
 	print_osd_utilization(osdmap, pgmap, ss,
-                              f.get(), method == "tree",
-                              class_name, item_name);
-	
+                              f.get(), method == "tree", filter);
 	cmdctx->odata.append(ss);
 	return 0;
       });
@@ -1349,6 +1331,33 @@ bool DaemonServer::_handle_command(
 	    safe_to_destroy.insert(osd);
 	    continue;  // clearly safe to destroy
 	  }
+          set<int64_t> pools;
+          osdmap.get_pool_ids_by_osd(g_ceph_context, osd, &pools);
+          if (pools.empty()) {
+            // osd does not belong to any pools yet
+            safe_to_destroy.insert(osd);
+            continue;
+          }
+          if (osdmap.is_down(osd) && osdmap.is_out(osd)) {
+            // if osd is down&out and all relevant pools are active+clean,
+            // then should be safe to destroy
+            bool all_osd_pools_active_clean = true;
+            for (auto &ps: pg_map.pg_stat) {
+              auto& pg = ps.first;
+              auto state = ps.second.state;
+              if (!pools.count(pg.pool()))
+                continue;
+              if ((state & (PG_STATE_ACTIVE | PG_STATE_CLEAN)) !=
+                           (PG_STATE_ACTIVE | PG_STATE_CLEAN)) {
+                all_osd_pools_active_clean = false;
+                break;
+              }
+            }
+            if (all_osd_pools_active_clean) {
+              safe_to_destroy.insert(osd);
+              continue;
+            }
+          }
 	  auto q = pg_map.num_pg_by_osd.find(osd);
 	  if (q != pg_map.num_pg_by_osd.end()) {
 	    if (q->second.acting > 0 || q->second.up_not_acting > 0) {
@@ -2317,7 +2326,7 @@ void DaemonServer::send_report()
 	  jf.dump_object("health_checks", m->health_checks);
 	  jf.flush(*_dout);
 	  *_dout << dendl;
-          if (osdmap.require_osd_release >= CEPH_RELEASE_LUMINOUS) {
+          if (osdmap.require_osd_release >= ceph_release_t::luminous) {
               clog->debug() << "pgmap v" << pg_map.version << ": " << pg_map;
           }
 	});
@@ -2558,24 +2567,28 @@ void DaemonServer::adjust_pgs()
 	    // max_misplaced, to somewhat limit the magnitude of
 	    // our potential error here.
 	    int next;
-	    if (aggro) {
+	    static constexpr unsigned MAX_NUM_OBJECTS_PER_PG_FOR_LEAP = 1;
+	    pool_stat_t s = pg_map.get_pg_pool_sum_stat(i.first);
+	    if (aggro ||
+		// pool is (virtually) empty; just jump to final pgp_num?
+		(p.get_pgp_num_target() > p.get_pgp_num() &&
+		 s.stats.sum.num_objects <= (MAX_NUM_OBJECTS_PER_PG_FOR_LEAP *
+					     p.get_pgp_num_target()))) {
 	      next = target;
 	    } else {
 	      double room =
 		std::min<double>(max_misplaced - misplaced_ratio,
-				 misplaced_ratio / 2.0);
+				 max_misplaced / 2.0);
 	      unsigned estmax = std::max<unsigned>(
 		(double)p.get_pg_num() * room, 1u);
-	      int delta = target - p.get_pgp_num();
-	      next = p.get_pgp_num();
-	      if (delta < 0) {
-		next += std::max<int>(-estmax, delta);
-	      } else {
-		next += std::min<int>(estmax, delta);
-	      }
+	      next = std::clamp(target,
+				p.get_pgp_num() - estmax,
+				p.get_pgp_num() + estmax);
 	      dout(20) << " room " << room << " estmax " << estmax
-		       << " delta " << delta << " next " << next << dendl;
-	      if (p.get_pgp_num_target() == p.get_pg_num_target()) {
+		       << " delta " << (target-p.get_pgp_num())
+		       << " next " << next << dendl;
+	      if (p.get_pgp_num_target() == p.get_pg_num_target() &&
+		  p.get_pgp_num_target() < p.get_pg_num()) {
 		// since pgp_num is tracking pg_num, ceph is handling
 		// pgp_num.  so, be responsible: don't let pgp_num get
 		// too far out ahead of merges (if we are merging).

@@ -30,7 +30,7 @@ namespace {
 
 int flush(librbd::ImageCtx *image_ctx) {
   C_SaferCond ctx;
-  auto aio_comp = librbd::io::AioCompletion::create(
+  auto aio_comp = librbd::io::AioCompletion::create_and_start(
     &ctx, image_ctx, librbd::io::AIO_TYPE_FLUSH);
   auto req = librbd::io::ImageDispatchSpec<>::create_flush_request(
     *image_ctx, aio_comp, librbd::io::FLUSH_SOURCE_INTERNAL, {});
@@ -77,7 +77,7 @@ public:
 
     m_remote_journaler = new ::journal::Journaler(
       m_threads->work_queue, m_threads->timer, &m_threads->timer_lock,
-      m_remote_io_ctx, m_remote_image_ctx->id, "mirror-uuid", {});
+      m_remote_io_ctx, m_remote_image_ctx->id, "mirror-uuid", {}, nullptr);
 
     m_client_meta = {"image-id"};
 

@@ -3,8 +3,8 @@
 #include <fmt/format.h>
 
 #include "crimson/os/cyan_collection.h"
-#include "crimson/os/cyan_store.h"
-#include "crimson/os/Transaction.h"
+#include "crimson/os/futurized_store.h"
+#include "os/Transaction.h"
 
 void OSDMeta::create(ceph::os::Transaction& t)
 {

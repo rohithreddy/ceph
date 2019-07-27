@@ -20,6 +20,7 @@ set(common_srcs
   HeartbeatMap.cc
   LogClient.cc
   LogEntry.cc
+  ostream_temp.cc
   Mutex.cc
   OutputDataSocket.cc
   PluginRegistry.cc
@@ -42,12 +43,12 @@ set(common_srcs
   ceph_argparse.cc
   ceph_context.cc
   ceph_crypto.cc
-  ceph_crypto_cms.cc
   ceph_frag.cc
   ceph_fs.cc
   ceph_hash.cc
   ceph_json.cc
   ceph_strings.cc
+  ceph_releases.cc
   ceph_time.cc
   cmdparse.cc
   code_environment.cc

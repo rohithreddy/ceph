@@ -4,11 +4,13 @@ import { I18n } from '@ngx-translate/i18n-polyfill';
 import * as _ from 'lodash';
 import { BsModalRef, BsModalService } from 'ngx-bootstrap/modal';
 
+import { ConfigurationService } from '../../../shared/api/configuration.service';
 import { PoolService } from '../../../shared/api/pool.service';
 import { CriticalConfirmationModalComponent } from '../../../shared/components/critical-confirmation-modal/critical-confirmation-modal.component';
 import { ActionLabelsI18n, URLVerbs } from '../../../shared/constants/app.constants';
 import { TableComponent } from '../../../shared/datatable/table/table.component';
 import { CellTemplate } from '../../../shared/enum/cell-template.enum';
+import { Icons } from '../../../shared/enum/icons.enum';
 import { ViewCacheStatus } from '../../../shared/enum/view-cache-status.enum';
 import { CdTableAction } from '../../../shared/models/cd-table-action';
 import { CdTableColumn } from '../../../shared/models/cd-table-column';
@@ -23,6 +25,7 @@ import { TaskWrapperService } from '../../../shared/services/task-wrapper.servic
 import { URLBuilderService } from '../../../shared/services/url-builder.service';
 import { PgCategoryService } from '../../shared/pg-category.service';
 import { Pool } from '../pool';
+import { PoolStats } from '../pool-stat';
 
 const BASE_URL = 'pool';
 
@@ -53,6 +56,7 @@ export class PoolListComponent implements OnInit {
   tableActions: CdTableAction[];
   viewCacheStatusList: any[];
   selectionCacheTiers: any[] = [];
+  monAllowPoolDelete = false;
 
   constructor(
     private poolService: PoolService,
@@ -64,33 +68,47 @@ export class PoolListComponent implements OnInit {
     private pgCategoryService: PgCategoryService,
     private dimlessPipe: DimlessPipe,
     private urlBuilder: URLBuilderService,
+    private configurationService: ConfigurationService,
     public actionLabels: ActionLabelsI18n
   ) {
     this.permissions = this.authStorageService.getPermissions();
     this.tableActions = [
       {
         permission: 'create',
-        icon: 'fa-plus',
+        icon: Icons.add,
         routerLink: () => this.urlBuilder.getCreate(),
         name: this.actionLabels.CREATE
       },
       {
         permission: 'update',
-        icon: 'fa-pencil',
+        icon: Icons.edit,
         routerLink: () =>
           this.urlBuilder.getEdit(encodeURIComponent(this.selection.first().pool_name)),
         name: this.actionLabels.EDIT
       },
       {
         permission: 'delete',
-        icon: 'fa-trash-o',
+        icon: Icons.destroy,
         click: () => this.deletePoolModal(),
-        name: this.actionLabels.DELETE
+        name: this.actionLabels.DELETE,
+        disable: () => !this.selection.first() || !this.monAllowPoolDelete,
+        disableDesc: () => this.getDisableDesc()
       }
     ];
+
+    this.configurationService.get('mon_allow_pool_delete').subscribe((data: any) => {
+      if (_.has(data, 'value')) {
+        const monSection = _.find(data.value, (v) => {
+          return v.section === 'mon';
+        }) || { value: false };
+        this.monAllowPoolDelete = monSection.value === 'true' ? true : false;
+      }
+    });
   }
 
   ngOnInit() {
+    const compare = (prop: string, pool1: Pool, pool2: Pool) =>
+      _.get(pool1, prop) > _.get(pool2, prop) ? 1 : -1;
     this.columns = [
       {
         prop: 'pool_name',
@@ -138,16 +156,25 @@ export class PoolListComponent implements OnInit {
         name: this.i18n('Crush Ruleset'),
         flexGrow: 3
       },
-      { name: this.i18n('Usage'), cellTemplate: this.poolUsageTpl, flexGrow: 3 },
       {
-        prop: 'stats.rd_bytes.series',
+        name: this.i18n('Usage'),
+        prop: 'usage',
+        cellTemplate: this.poolUsageTpl,
+        flexGrow: 3
+      },
+      {
+        prop: 'stats.rd_bytes.rates',
         name: this.i18n('Read bytes'),
+        comparator: (_valueA, _valueB, rowA: Pool, rowB: Pool) =>
+          compare('stats.rd_bytes.latest', rowA, rowB),
         cellTransformation: CellTemplate.sparkline,
         flexGrow: 3
       },
       {
-        prop: 'stats.wr_bytes.series',
+        prop: 'stats.wr_bytes.rates',
         name: this.i18n('Write bytes'),
+        comparator: (_valueA, _valueB, rowA: Pool, rowB: Pool) =>
+          compare('stats.wr_bytes.latest', rowA, rowB),
         cellTransformation: CellTemplate.sparkline,
         flexGrow: 3
       },
@@ -209,18 +236,27 @@ export class PoolListComponent implements OnInit {
 
   transformPoolsData(pools: any) {
     const requiredStats = ['bytes_used', 'max_avail', 'rd_bytes', 'wr_bytes', 'rd', 'wr'];
-    const emptyStat = { latest: 0, rate: 0, series: [] };
+    const emptyStat = { latest: 0, rate: 0, rates: [] };
 
     _.forEach(pools, (pool: Pool) => {
       pool['pg_status'] = this.transformPgStatus(pool['pg_status']);
-      const stats = {};
+      const stats: PoolStats = {};
       _.forEach(requiredStats, (stat) => {
         stats[stat] = pool.stats && pool.stats[stat] ? pool.stats[stat] : emptyStat;
       });
       pool['stats'] = stats;
+      const avail = stats.bytes_used.latest + stats.max_avail.latest;
+      pool['usage'] = avail > 0 ? stats.bytes_used.latest / avail : avail;
+
+      if (
+        !pool.cdExecuting &&
+        pool.pg_num + pool.pg_placement_num !== pool.pg_num_target + pool.pg_placement_num_target
+      ) {
+        pool['cdExecuting'] = 'Updating';
+      }
 
       ['rd_bytes', 'wr_bytes'].forEach((stat) => {
-        pool.stats[stat].series = pool.stats[stat].series.map((point) => point[1]);
+        pool.stats[stat].rates = pool.stats[stat].rates.map((point) => point[1]);
       });
       pool.cdIsBinary = true;
     });
@@ -244,5 +280,13 @@ export class PoolListComponent implements OnInit {
   getSelectionTiers() {
     const cacheTierIds = this.selection.hasSingleSelection ? this.selection.first()['tiers'] : [];
     this.selectionCacheTiers = this.pools.filter((pool) => cacheTierIds.includes(pool.pool));
+  }
+
+  getDisableDesc(): string | undefined {
+    if (!this.monAllowPoolDelete) {
+      return this.i18n(
+        'Pool deletion is disabled by the mon_allow_pool_delete configuration setting.'
+      );
+    }
   }
 }

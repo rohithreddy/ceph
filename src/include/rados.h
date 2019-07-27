@@ -195,11 +195,6 @@ extern const char *ceph_osd_state_name(int s);
 #define CEPH_RELEASE_OCTOPUS    15
 #define CEPH_RELEASE_MAX        16  /* highest + 1 */
 
-extern const char *ceph_release_name(int r);
-extern int ceph_release_from_name(const char *s);
-extern uint64_t ceph_release_features(int r);
-extern int ceph_release_from_features(uint64_t features);
-
 /*
  * The error code to return when an OSD can't handle a write
  * because it is too large.
@@ -320,6 +315,7 @@ extern int ceph_release_from_features(uint64_t features);
 	f(SET_CHUNK,	__CEPH_OSD_OP(WR, DATA, 40),	"set-chunk")	    \
 	f(TIER_PROMOTE,	__CEPH_OSD_OP(WR, DATA, 41),	"tier-promote")	    \
 	f(UNSET_MANIFEST, __CEPH_OSD_OP(WR, DATA, 42),	"unset-manifest")   \
+	f(TIER_FLUSH, __CEPH_OSD_OP(WR, DATA, 43),	"tier-flush")	    \
 									    \
 	/** attrs **/							    \
 	/* read */							    \

@@ -4,7 +4,7 @@ import { ReactiveFormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { RouterTestingModule } from '@angular/router/testing';
 
-import { ToastModule } from 'ng2-toastr';
+import { ToastrModule } from 'ngx-toastr';
 
 import { ActivatedRouteStub } from '../../../../testing/activated-route-stub';
 import { configureTestBed, i18nProviders } from '../../../../testing/unit-test-helper';
@@ -37,9 +37,9 @@ describe('IscsiTargetFormComponent', () => {
       'backstore:1': 0,
       'backstore:2': 0
     },
-    supported_rbd_features: {
-      'backstore:1': 61,
-      'backstore:2': 61
+    unsupported_rbd_features: {
+      'backstore:1': 0,
+      'backstore:2': 0
     },
     backstores: ['backstore:1', 'backstore:2'],
     default_backstore: 'backstore:1'
@@ -130,7 +130,7 @@ describe('IscsiTargetFormComponent', () => {
         ReactiveFormsModule,
         HttpClientTestingModule,
         RouterTestingModule,
-        ToastModule.forRoot()
+        ToastrModule.forRoot()
       ],
       providers: [
         i18nProviders,

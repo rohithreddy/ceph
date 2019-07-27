@@ -5,7 +5,6 @@
 #include "messages/MOSDPing.h"
 #include "messages/MOSDFailure.h"
 
-#include "crimson/common/auth_service.h"
 #include "crimson/common/config_proxy.h"
 #include "crimson/net/Connection.h"
 #include "crimson/net/Messenger.h"
@@ -41,6 +40,12 @@ seastar::future<> Heartbeat::start(entity_addrvec_t front_addrs,
   for (auto& addr : boost::join(front_addrs.v, back_addrs.v)) {
     addr.set_port(0);
   }
+
+  using ceph::net::SocketPolicy;
+  front_msgr.set_policy(entity_name_t::TYPE_OSD,
+                        SocketPolicy::stateless_server(0));
+  back_msgr.set_policy(entity_name_t::TYPE_OSD,
+                       SocketPolicy::stateless_server(0));
   return seastar::when_all_succeed(start_messenger(front_msgr, front_addrs),
                                    start_messenger(back_msgr, back_addrs))
     .then([this] {
@@ -75,17 +80,25 @@ const entity_addrvec_t& Heartbeat::get_back_addrs() const
   return back_msgr.get_myaddrs();
 }
 
+void Heartbeat::set_require_authorizer(bool require_authorizer)
+{
+  if (front_msgr.get_require_authorizer() != require_authorizer) {
+    front_msgr.set_require_authorizer(require_authorizer);
+    back_msgr.set_require_authorizer(require_authorizer);
+  }
+}
+
 seastar::future<> Heartbeat::add_peer(osd_id_t peer, epoch_t epoch)
 {
   auto found = peers.find(peer);
   if (found == peers.end()) {
     logger().info("add_peer({})", peer);
     auto osdmap = service.get_map();
-    // TODO: msgr v2
+    // TODO: use addrs
     return seastar::when_all_succeed(
-        front_msgr.connect(osdmap->get_hb_front_addrs(peer).legacy_addr(),
+        front_msgr.connect(osdmap->get_hb_front_addrs(peer).front(),
                            CEPH_ENTITY_TYPE_OSD),
-        back_msgr.connect(osdmap->get_hb_back_addrs(peer).legacy_addr(),
+        back_msgr.connect(osdmap->get_hb_back_addrs(peer).front(),
                           CEPH_ENTITY_TYPE_OSD))
       .then([this, peer, epoch] (auto xcon_front, auto xcon_back) {
         PeerInfo info;
@@ -269,10 +282,10 @@ seastar::future<> Heartbeat::handle_reply(ceph::net::Connection* conn,
   }
   const auto now = clock::now();
   auto& unacked = ping->second.unacknowledged;
-  if (conn == peer.con_back) {
+  if (conn == peer.con_back.get()) {
     peer.last_rx_back = now;
     unacked--;
-  } else if (conn == peer.con_front) {
+  } else if (conn == peer.con_front.get()) {
     peer.last_rx_front = now;
     unacked--;
   }
@@ -296,11 +309,6 @@ seastar::future<> Heartbeat::handle_you_died()
   return seastar::now();
 }
 
-AuthAuthorizer* Heartbeat::ms_get_authorizer(peer_type_t peer) const
-{
-  return monc.get_authorizer(peer);
-}
-
 seastar::future<> Heartbeat::send_heartbeats()
 {
   using peers_item_t = typename peers_map_t::value_type;
@@ -309,14 +317,14 @@ seastar::future<> Heartbeat::send_heartbeats()
       const auto now = clock::now();
       const auto deadline =
         now + std::chrono::seconds(local_conf()->osd_heartbeat_grace);
-      auto& [peer, info] = item;
+      auto& info = item.second;
       info.last_tx = now;
       if (clock::is_zero(info.first_tx)) {
         info.first_tx = now;
       }
       const utime_t sent_stamp{now};
-      auto [reply, added] = info.ping_history.emplace(sent_stamp,
-                                                      reply_t{deadline, 0});
+      [[maybe_unused]] auto [reply, added] =
+        info.ping_history.emplace(sent_stamp, reply_t{deadline, 0});
       std::vector<ceph::net::ConnectionRef> conns{info.con_front,
                                                   info.con_back};
       return seastar::parallel_for_each(std::move(conns),

@@ -48,9 +48,10 @@ void RGWPSCreateTopicOp::execute()
   ups = std::make_unique<RGWUserPubSub>(store, s->owner.get_id());
   op_ret = ups->create_topic(topic_name, dest, topic_arn);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to create topic, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to create topic '" << topic_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully created topic '" << topic_name << "'" << dendl;
 }
 
 // command: PUT /topics/<topic-name>[&push-endpoint=<endpoint>[&<arg1>=<value1>]]
@@ -66,6 +67,7 @@ public:
     // bucket to store events/records will be set only when subscription is created
     dest.bucket_name = "";
     dest.oid_prefix = "";
+    dest.arn_topic = topic_name;
     // the topic ARN will be sent in the reply
     const rgw::ARN arn(rgw::Partition::aws, rgw::Service::sns, 
         store->svc.zone->get_zonegroup().get_name(),
@@ -121,6 +123,7 @@ void RGWPSListTopicsOp::execute()
     ldout(s->cct, 1) << "failed to get topics, ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully got topics" << dendl;
 }
 
 // command: GET /topics
@@ -177,6 +180,7 @@ void RGWPSGetTopicOp::execute()
     ldout(s->cct, 1) << "failed to get topic '" << topic_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 1) << "successfully got topic '" << topic_name << "'" << dendl;
 }
 
 // command: GET /topics/<topic-name>
@@ -235,9 +239,10 @@ void RGWPSDeleteTopicOp::execute()
   ups = std::make_unique<RGWUserPubSub>(store, s->owner.get_id());
   op_ret = ups->remove_topic(topic_name);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to remove topic, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to remove topic '" << topic_name << ", ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 1) << "successfully removed topic '" << topic_name << "'" << dendl;
 }
 
 // command: DELETE /topics/<topic-name>
@@ -324,9 +329,10 @@ void RGWPSCreateSubOp::execute()
   auto sub = ups->get_sub(sub_name);
   op_ret = sub->subscribe(topic_name, dest);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to create subscription, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to create subscription '" << sub_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully created subscription '" << sub_name << "'" << dendl;
 }
 
 // command: PUT /subscriptions/<sub-name>?topic=<topic-name>[&push-endpoint=<endpoint>[&<arg1>=<value1>]]...
@@ -349,6 +355,7 @@ public:
     dest.bucket_name = string(conf["data_bucket_prefix"]) + s->owner.get_id().to_str() + "-" + topic_name;
     dest.oid_prefix = string(conf["data_oid_prefix"]) + sub_name + "/";
     dest.push_endpoint_args = s->info.args.get_str();
+    dest.arn_topic = topic_name;
 
     return 0;
   }
@@ -387,9 +394,10 @@ void RGWPSGetSubOp::execute()
   auto sub = ups->get_sub(sub_name);
   op_ret = sub->get_conf(&result);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to get subscription, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to get subscription '" << sub_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully got subscription '" << sub_name << "'" << dendl;
 }
 
 // command: GET /subscriptions/<sub-name>
@@ -448,9 +456,10 @@ void RGWPSDeleteSubOp::execute()
   auto sub = ups->get_sub(sub_name);
   op_ret = sub->unsubscribe(topic_name);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to remove subscription, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to remove subscription '" << sub_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully removed subscription '" << sub_name << "'" << dendl;
 }
 
 // command: DELETE /subscriptions/<sub-name>
@@ -498,9 +507,10 @@ void RGWPSAckSubEventOp::execute()
   auto sub = ups->get_sub_with_events(sub_name);
   op_ret = sub->remove_event(event_id);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to ack event, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to ack event on subscription '" << sub_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully acked event on subscription '" << sub_name << "'" << dendl;
 }
 
 // command: POST /subscriptions/<sub-name>?ack&event-id=<event-id>
@@ -561,14 +571,15 @@ void RGWPSPullSubEventsOp::execute()
   sub = ups->get_sub_with_events(sub_name);
   if (!sub) {
     op_ret = -ENOENT;
-    ldout(s->cct, 1) << "failed to get subscription, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to get subscription '" << sub_name << "' for events, ret=" << op_ret << dendl;
     return;
   }
   op_ret = sub->list_events(marker, max_entries);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to get subscription events, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to get events from subscription '" << sub_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully got events from subscription '" << sub_name << "'" << dendl;
 }
 
 // command: GET /subscriptions/<sub-name>?events[&max-entries=<max-entries>][&marker=<marker>]
@@ -691,7 +702,7 @@ public:
     const auto& id = s->owner.get_id();
 
     ret = store->get_bucket_info(*s->sysobj_ctx, id.tenant, bucket_name,
-                                 bucket_info, nullptr, nullptr);
+                                 bucket_info, nullptr, null_yield, nullptr);
     if (ret < 0) {
       ldout(s->cct, 1) << "failed to get bucket info, cannot verify ownership" << dendl;
       return ret;
@@ -746,9 +757,10 @@ void RGWPSCreateNotif_ObjStore_Ceph::execute()
   auto b = ups->get_bucket(bucket_info.bucket);
   op_ret = b->create_notification(topic_name, events);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to create notification, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to create notification for topic '" << topic_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully created notification for topic '" << topic_name << "'" << dendl;
 }
 
 namespace {
@@ -923,7 +935,7 @@ void RGWPSCreateNotif_ObjStore_S3::execute() {
     dest.bucket_name = string(conf["data_bucket_prefix"]) + s->owner.get_id().to_str() + "-" + unique_topic_name;
     dest.oid_prefix = string(conf["data_oid_prefix"]) + sub_name + "/";
     auto sub = ups->get_sub(sub_name);
-    op_ret = sub->subscribe(unique_topic_name, dest, c.id);
+    op_ret = sub->subscribe(unique_topic_name, dest, sub_name);
     if (op_ret < 0) {
       ldout(s->cct, 1) << "failed to auto-generate subscription '" << sub_name << "', ret=" << op_ret << dendl;
       // rollback generated notification (ignore return value)
@@ -932,6 +944,7 @@ void RGWPSCreateNotif_ObjStore_S3::execute() {
       ups->remove_topic(unique_topic_name);
       return;
     }
+    ldout(s->cct, 20) << "successfully auto-generated subscription '" << sub_name << "'" << dendl;
   }
 }
 
@@ -952,7 +965,7 @@ public:
     }
 
     ret = store->get_bucket_info(*s->sysobj_ctx, s->owner.get_id().tenant, bucket_name,
-                                 bucket_info, nullptr, nullptr);
+                                 bucket_info, nullptr, null_yield, nullptr);
     if (ret < 0) {
       return ret;
     }
@@ -1001,9 +1014,10 @@ void RGWPSDeleteNotif_ObjStore_Ceph::execute() {
   auto b = ups->get_bucket(bucket_info.bucket);
   op_ret = b->remove_notification(topic_name);
   if (op_ret < 0) {
-    ldout(s->cct, 1) << "failed to remove notification, ret=" << op_ret << dendl;
+    ldout(s->cct, 1) << "failed to remove notification from topic '" << topic_name << "', ret=" << op_ret << dendl;
     return;
   }
+  ldout(s->cct, 20) << "successfully removed notification from topic '" << topic_name << "'" << dendl;
 }
 
 // command (extension to S3): DELETE /bucket?notification[=<notification-id>]
@@ -1111,7 +1125,7 @@ public:
     }
 
     ret = store->get_bucket_info(*s->sysobj_ctx, s->owner.get_id().tenant, bucket_name,
-                                 bucket_info, nullptr, nullptr);
+                                 bucket_info, nullptr, null_yield, nullptr);
     if (ret < 0) {
       return ret;
     }

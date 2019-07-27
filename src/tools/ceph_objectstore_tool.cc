@@ -289,6 +289,8 @@ struct lookup_ghobject : public action_on_object_t {
 int file_fd = fd_none;
 bool debug;
 bool force = false;
+bool no_superblock = false;
+
 super_header sh;
 
 static int get_fd_data(int fd, bufferlist &bl)
@@ -459,7 +461,7 @@ int write_info(ObjectStore::Transaction &t, epoch_t epoch, pg_info_t &info,
   ghobject_t pgmeta_oid(info.pgid.make_pgmeta_oid());
   map<string,bufferlist> km;
   pg_info_t last_written_info;
-  int ret = PG::_prepare_write_info(
+  int ret = prepare_info_keymap(
     g_ceph_context,
     &km, epoch,
     info,
@@ -1757,10 +1759,10 @@ int ObjectStoreTool::do_import(ObjectStore *store, OSDSuperblock& sb,
       if (!dry_run) {
 	ObjectStore::Transaction t;
 	ch = store->create_new_collection(coll);
-	PG::_create(
+	create_pg_collection(
 	  t, pgid,
 	  pgid.get_split_bits(ms.osdmap.get_pg_pool(pgid.pool())->get_pg_num()));
-	PG::_init(t, pgid, NULL);
+	init_pg_ondisk(t, pgid, NULL);
 
 	// mark this coll for removal until we're done
 	map<string,bufferlist> values;
@@ -1949,14 +1951,16 @@ int do_remove_object(ObjectStore *store, coll_t coll,
       cerr << "Can't get snapset error " << cpp_strerror(r) << std::endl;
       return r;
     }
-    if (!ss.snaps.empty() && !all) {
+//    cout << "snapset " << ss << std::endl;
+    if (!ss.clone_snaps.empty() && !all) {
       if (force) {
         cout << "WARNING: only removing "
              << (ghobj.hobj.is_head() ? "head" : "snapdir")
-             << " with snapshots present" << std::endl;
-        ss.snaps.clear();
+             << " with clones present" << std::endl;
+        ss.clone_snaps.clear();
       } else {
-        cerr << "Snapshots are present, use removeall to delete everything" << std::endl;
+        cerr << "Clones are present, use removeall to delete everything"
+	     << std::endl;
         return -EINVAL;
       }
     }
@@ -1966,10 +1970,9 @@ int do_remove_object(ObjectStore *store, coll_t coll,
   OSDriver::OSTransaction _t(driver.get_transaction(&t));
 
   ghobject_t snapobj = ghobj;
-  for (vector<snapid_t>::iterator i = ss.snaps.begin() ;
-       i != ss.snaps.end() ; ++i) {
-    snapobj.hobj.snap = *i;
-    cout << "remove " << snapobj << std::endl;
+  for (auto& p : ss.clone_snaps) {
+    snapobj.hobj.snap = p.first;
+    cout << "remove clone " << snapobj << std::endl;
     if (!dry_run) {
       r = remove_object(coll, snapobj, mapper, &_t, &t, type);
       if (r < 0)
@@ -2436,6 +2439,8 @@ int print_obj_info(ObjectStore *store, coll_t coll, ghobject_t &ghobj, Formatter
            << cpp_strerror(r) << std::endl;
     }
   }
+  gr = store->dump_onode(ch, ghobj, "onode", formatter);
+
   formatter->close_section();
   formatter->flush(cout);
   cout << std::endl;
@@ -2630,9 +2635,9 @@ int clear_snapset(ObjectStore *store, coll_t coll, ghobject_t &ghobj,
   // Use "seq" to just corrupt SnapSet.seq
   if (arg == "corrupt" || arg == "seq")
     ss.seq = 0;
-  // Use "snaps" to just clear SnapSet.snaps
+  // Use "snaps" to just clear SnapSet.clone_snaps
   if (arg == "corrupt" || arg == "snaps")
-    ss.snaps.clear();
+    ss.clone_snaps.clear();
   // By default just clear clone, clone_overlap and clone_size
   if (arg == "corrupt")
     arg = "";
@@ -3091,6 +3096,7 @@ int main(int argc, char **argv)
      "Output format which may be json, json-pretty, xml, xml-pretty")
     ("debug", "Enable diagnostic output to stderr")
     ("no-mon-config", "Do not contact mons for config")
+    ("no-superblock", "Do not read superblock")
     ("force", "Ignore some types of errors and proceed with operation - USE WITH CAUTION: CORRUPTION POSSIBLE NOW OR IN THE FUTURE")
     ("skip-journal-replay", "Disable journal replay")
     ("skip-mount-omap", "Disable mounting of omap")
@@ -3141,6 +3147,8 @@ int main(int argc, char **argv)
   debug = (vm.count("debug") > 0);
 
   force = (vm.count("force") > 0);
+
+  no_superblock = (vm.count("no-superblock") > 0);
 
   if (vm.count("namespace"))
     nspace = argnspace;
@@ -3475,32 +3483,35 @@ int main(int argc, char **argv)
 #endif
 
   bufferlist bl;
-  OSDSuperblock superblock;
   auto ch = fs->open_collection(coll_t::meta());
-  bufferlist::const_iterator p;
-  ret = fs->read(ch, OSD_SUPERBLOCK_GOBJECT, 0, 0, bl);
-  if (ret < 0) {
-    cerr << "Failure to read OSD superblock: " << cpp_strerror(ret) << std::endl;
-    goto out;
-  }
+  std::unique_ptr<OSDSuperblock> superblock;
+  if (!no_superblock) {
+    superblock.reset(new OSDSuperblock);
+    bufferlist::const_iterator p;
+    ret = fs->read(ch, OSD_SUPERBLOCK_GOBJECT, 0, 0, bl);
+    if (ret < 0) {
+      cerr << "Failure to read OSD superblock: " << cpp_strerror(ret) << std::endl;
+      goto out;
+    }
 
-  p = bl.cbegin();
-  decode(superblock, p);
+    p = bl.cbegin();
+    decode(*superblock, p);
 
-  if (debug) {
-    cerr << "Cluster fsid=" << superblock.cluster_fsid << std::endl;
-  }
+    if (debug) {
+      cerr << "Cluster fsid=" << superblock->cluster_fsid << std::endl;
+    }
 
-  if (debug) {
-    cerr << "Supported features: " << supported << std::endl;
-    cerr << "On-disk features: " << superblock.compat_features << std::endl;
-  }
-  if (supported.compare(superblock.compat_features) == -1) {
-    CompatSet unsupported = supported.unsupported(superblock.compat_features);
-    cerr << "On-disk OSD incompatible features set "
-      << unsupported << std::endl;
-    ret = -EINVAL;
-    goto out;
+    if (debug) {
+      cerr << "Supported features: " << supported << std::endl;
+      cerr << "On-disk features: " << superblock->compat_features << std::endl;
+    }
+    if (supported.compare(superblock->compat_features) == -1) {
+      CompatSet unsupported = supported.unsupported(superblock->compat_features);
+      cerr << "On-disk OSD incompatible features set "
+	<< unsupported << std::endl;
+      ret = -EINVAL;
+      goto out;
+    }
   }
 
   if (op == "apply-layout-settings") {
@@ -3515,7 +3526,8 @@ int main(int argc, char **argv)
     } else if (vm.count("arg1") && isdigit(arg1[0])) {
       target_level = atoi(arg1.c_str());
     }
-    ret = apply_layout_settings(fs, superblock, pool, pgid, dry_run, target_level);
+    ceph_assert(superblock != nullptr);
+    ret = apply_layout_settings(fs, *superblock, pool, pgid, dry_run, target_level);
     goto out;
   }
 
@@ -3630,9 +3642,9 @@ int main(int argc, char **argv)
   }
 
   if (op == "import") {
-
+    ceph_assert(superblock != nullptr);
     try {
-      ret = tool.do_import(fs, superblock, force, pgidstr);
+      ret = tool.do_import(fs, *superblock, force, pgidstr);
     }
     catch (const buffer::error &e) {
       cerr << "do_import threw exception error " << e.what() << std::endl;
@@ -3661,7 +3673,8 @@ int main(int argc, char **argv)
     bufferlist bl;
     OSDMap osdmap;
     if (epoch == 0) {
-      epoch = superblock.current_epoch;
+      ceph_assert(superblock != nullptr);
+      epoch = superblock->current_epoch;
     }
     ret = get_osdmap(fs, epoch, osdmap, bl);
     if (ret) {
@@ -3688,7 +3701,8 @@ int main(int argc, char **argv)
   } else if (op == "get-inc-osdmap") {
     bufferlist bl;
     if (epoch == 0) {
-      epoch = superblock.current_epoch;
+      ceph_assert(superblock != nullptr);
+      epoch = superblock->current_epoch;
     }
     ret = get_inc_osdmap(fs, epoch, bl);
     if (ret < 0) {
@@ -3718,7 +3732,8 @@ int main(int argc, char **argv)
       cerr << "Please specify the path to monitor db to update" << std::endl;
       ret = -EINVAL;
     } else {
-      ret = update_mon_db(*fs, superblock, dpath + "/keyring", mon_store_path);
+      ceph_assert(superblock != nullptr);
+      ret = update_mon_db(*fs, *superblock, dpath + "/keyring", mon_store_path);
     }
     goto out;
   }
@@ -3758,8 +3773,9 @@ int main(int argc, char **argv)
   }
 
   if (op == "dump-super") {
+    ceph_assert(superblock != nullptr);
     formatter->open_object_section("superblock");
-    superblock.dump(formatter);
+    superblock->dump(formatter);
     formatter->close_section();
     formatter->flush(cout);
     cout << std::endl;
@@ -4112,7 +4128,8 @@ int main(int argc, char **argv)
       cerr << "struct_v " << (int)struct_ver << std::endl;
 
     if (op == "export" || op == "export-remove") {
-      ret = tool.do_export(fs, coll, pgid, info, map_epoch, struct_ver, superblock, past_intervals);
+      ceph_assert(superblock != nullptr);
+      ret = tool.do_export(fs, coll, pgid, info, map_epoch, struct_ver, *superblock, past_intervals);
       if (ret == 0) {
         cerr << "Export successful" << std::endl;
         if (op == "export-remove") {
@@ -4150,11 +4167,12 @@ int main(int argc, char **argv)
 
       cout << "Marking complete " << std::endl;
 
-      info.last_update = eversion_t(superblock.current_epoch, info.last_update.version + 1);
+      ceph_assert(superblock != nullptr);
+      info.last_update = eversion_t(superblock->current_epoch, info.last_update.version + 1);
       info.last_backfill = hobject_t::get_max();
-      info.last_epoch_started = superblock.current_epoch;
-      info.history.last_epoch_started = superblock.current_epoch;
-      info.history.last_epoch_clean = superblock.current_epoch;
+      info.last_epoch_started = superblock->current_epoch;
+      info.history.last_epoch_started = superblock->current_epoch;
+      info.history.last_epoch_clean = superblock->current_epoch;
       past_intervals.clear();
 
       if (!dry_run) {
@@ -4215,6 +4233,16 @@ int main(int argc, char **argv)
   }
 
 out:
+  if (debug) {
+    ostringstream ostr;
+    Formatter* f = Formatter::create("json-pretty", "json-pretty", "json-pretty");
+    cct->get_perfcounters_collection()->dump_formatted(f, false);
+    ostr << "ceph-objectstore-tool ";
+    f->flush(ostr);
+    delete f;
+    cout <<  ostr.str() << std::endl;
+  }
+
   int r = fs->umount();
   if (r < 0) {
     cerr << "umount failed: " << cpp_strerror(r) << std::endl;

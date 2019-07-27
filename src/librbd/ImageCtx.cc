@@ -110,7 +110,6 @@ public:
       timestamp_lock(util::unique_lock_name("librbd::ImageCtx::timestamp_lock", this)),
       async_ops_lock(util::unique_lock_name("librbd::ImageCtx::async_ops_lock", this)),
       copyup_list_lock(util::unique_lock_name("librbd::ImageCtx::copyup_list_lock", this)),
-      completed_reqs_lock(util::unique_lock_name("librbd::ImageCtx::completed_reqs_lock", this)),
       extra_read_flags(0),
       old_format(false),
       order(0), size(0), features(0),
@@ -123,6 +122,8 @@ public:
       operations(new Operations<>(*this)),
       exclusive_lock(nullptr), object_map(nullptr),
       io_work_queue(nullptr), op_work_queue(nullptr),
+      external_callback_completions(32),
+      event_socket_completions(32),
       asok_hook(nullptr),
       trace_endpoint("librbd")
   {
@@ -409,9 +410,7 @@ public:
   }
 
   string ImageCtx::get_object_name(uint64_t num) const {
-    char buf[object_prefix.length() + 32];
-    snprintf(buf, sizeof(buf), format_string, num);
-    return string(buf);
+    return util::data_object_name(this, num);
   }
 
   uint64_t ImageCtx::get_stripe_unit() const
@@ -688,25 +687,6 @@ public:
     return len;
   }
 
-  void ImageCtx::flush_async_operations() {
-    C_SaferCond ctx;
-    flush_async_operations(&ctx);
-    ctx.wait();
-  }
-
-  void ImageCtx::flush_async_operations(Context *on_finish) {
-    {
-      Mutex::Locker l(async_ops_lock);
-      if (!async_ops.empty()) {
-        ldout(cct, 20) << "flush async operations: " << on_finish << " "
-                       << "count=" << async_ops.size() << dendl;
-        async_ops.front()->add_flush_context(on_finish);
-        return;
-      }
-    }
-    on_finish->complete(0);
-  }
-
   void ImageCtx::cancel_async_requests() {
     C_SaferCond ctx;
     cancel_async_requests(&ctx);
@@ -729,13 +709,6 @@ public:
     }
 
     on_finish->complete(0);
-  }
-
-  void ImageCtx::clear_pending_completions() {
-    Mutex::Locker l(completed_reqs_lock);
-    ldout(cct, 10) << "clear pending AioCompletion: count="
-                   << completed_reqs.size() << dendl;
-    completed_reqs.clear();
   }
 
   void ImageCtx::apply_metadata(const std::map<std::string, bufferlist> &meta,
